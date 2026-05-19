@@ -367,7 +367,7 @@ export default function App() {
       const imgBlock = photoB64 ? [{ type:"image", source:{ type:"base64", media_type:photoMime, data:photoB64 } }] : [];
       const parsed = await callAPI(
         [{ role:"user", content:[...imgBlock, { type:"text", text:`${photoB64?"Analyze the body in this photo and ":""}create a personalized 7-day fitness plan.\nCountry:${countryName} Age:${goals.age||"?"} Gender:${goals.gender} Height:${hCm?hCm+"cm":"?"} Weight:${wKg?wKg+"kg":"?"} Target:${tKg?tKg+"kg":"?"} Goal:${goals.fitnessGoal} Activity:${goals.activityLevel} Timeframe:${goals.timeframe}wks Diet:${goals.dietaryPrefs||"none"}\nReturn ONLY valid JSON (no markdown):\n${SCHEMA}` }] }],
-        "You are an elite fitness coach and nutritionist. Return only valid JSON, no markdown."
+        "You are an elite fitness coach and nutritionist. Return only valid JSON, no markdown, no backticks, no extra text before or after the JSON."
       );
       setPlan(parsed); sSet("fa:plan", parsed); setStep(4); setTab("workout"); setOpenDay(0);
     } catch (err) { setError(err.message || "Generation failed. Please try again."); setStep(2); }
