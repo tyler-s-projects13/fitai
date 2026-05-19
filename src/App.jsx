@@ -353,7 +353,7 @@ export default function App() {
     }
     const raw = data.content?.find(b => b.type === "text")?.text || "";
     try { return JSON.parse(raw.replace(/```json\n?|\n?```/g,"").trim()); }
-    catch { throw new Error("AI returned an unexpected format. Please try again."); }
+    catch { throw new Error("Parse error: " + raw.slice(0, 200)); }
   };
 
   const generate = async () => {
