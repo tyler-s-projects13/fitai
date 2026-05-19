@@ -11,6 +11,16 @@ function sDel(key) {
   try { localStorage.removeItem(key); } catch {}
 }
 
+// ── Unit conversion helpers ───────────────────────────────────────────
+const KG_TO_LBS = 2.20462;
+function toDisplay(kg, unit) {
+  if (unit === "lbs") return +(kg * KG_TO_LBS).toFixed(1);
+  return +parseFloat(kg).toFixed(1);
+}
+function toKg(val, unit) {
+  return unit === "lbs" ? +(val / KG_TO_LBS).toFixed(2) : +parseFloat(val).toFixed(2);
+}
+
 // ── Image resize helper ───────────────────────────────────────────────
 function resizeImg(dataUrl, maxW = 480) {
   return new Promise((res) => {
@@ -32,6 +42,42 @@ function weekPhase(w) {
   if (w <= 8)  return { label: "Progressive Overload", color: "#C8F135", note: "Increase load 5% on compound lifts",     weight: "+5%",         sets: 1 };
   if (w <= 12) return { label: "Peak Phase",            color: "#FF7A5A", note: "Push intensity — increase load by 10%", weight: "+10%",        sets: 1 };
   return              { label: "Advanced",              color: "#D678FF", note: "Periodize and push to new limits",      weight: "+15%",        sets: 2 };
+}
+
+// ── Grocery list helper ───────────────────────────────────────────────
+function buildGroceryList(meals) {
+  if (!meals?.length) return [];
+  const seen = new Set();
+  return meals.flatMap(m => m.items || []).filter(item => {
+    const key = item.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 20);
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+}
+
+// ── Weight Chart (outside App to avoid recreation on every render) ────
+function WeightChart({ checkins, unit }) {
+  if (checkins.length < 2) return null;
+  const weights = checkins.map(c => toDisplay(c.weight, unit));
+  const minW = Math.min(...weights) - 1, maxW = Math.max(...weights) + 1;
+  const W = 320, H = 90;
+  const pts = weights.map((w, i) => {
+    const x = 16 + (i / (weights.length - 1)) * (W - 32);
+    const y = H - 12 - ((w - minW) / (maxW - minW || 1)) * (H - 24);
+    return [Math.round(x), Math.round(y)];
+  });
+  const A = "#C8F135";
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block", margin: "0.5rem 0 0.25rem" }}>
+      <polyline points={pts.map(p => p.join(",")).join(" ")} fill="none" stroke={A} strokeWidth="2" strokeLinejoin="round" />
+      {pts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3" fill={A} />)}
+      <text x="16" y={H} fill="#555" fontSize="9">{checkins[0].date}</text>
+      <text x={W - 16} y={H} fill="#555" fontSize="9" textAnchor="end">{checkins[checkins.length - 1].date}</text>
+      <text x={pts[pts.length - 1][0]} y={pts[pts.length - 1][1] - 8} fill={A} fontSize="10" textAnchor="middle" fontWeight="700">
+        {toDisplay(checkins[checkins.length - 1].weight, unit)}{unit}
+      </text>
+    </svg>
+  );
 }
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -91,6 +137,10 @@ export default function App() {
   const [checkins,   setCheckins]   = useState([]);
   const [newCI,      setNewCI]      = useState({ weight: "", note: "" });
   const [adjusting,  setAdjusting]  = useState(false);
+  // NEW: unit system + exercise completion tracking
+  const [unit,       setUnit]       = useState("kg");  // "kg" | "lbs"
+  const [doneExs,    setDoneExs]    = useState({});    // { "dayIdx-exIdx": true }
+  const [copied,     setCopied]     = useState(false);
   const fileRef = useRef(null);
   const progRef = useRef(null);
 
@@ -101,6 +151,8 @@ export default function App() {
     const pp = sGet("fa:photos");   if (pp) setProgPhotos(pp);
     const ci = sGet("fa:checkins"); if (ci) setCheckins(ci);
     const g  = sGet("fa:goals");    if (g)  setGoals(prev => ({ ...prev, ...g }));
+    const u  = sGet("fa:unit");     if (u)  setUnit(u);
+    const de = sGet("fa:done");     if (de) setDoneExs(de);
   }, []);
 
   // Register service worker (Vite PWA plugin handles this, but belts & braces)
@@ -137,14 +189,39 @@ export default function App() {
 
   const addCheckin = () => {
     if (!newCI.weight) return;
-    const entry = { id: Date.now(), date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), weight: parseFloat(newCI.weight), note: newCI.note, week };
+    // Always store weight internally in kg
+    const weightKg = toKg(parseFloat(newCI.weight), unit);
+    const entry = { id: Date.now(), date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), weight: weightKg, note: newCI.note, week };
     const updated = [...checkins, entry];
     setCheckins(updated); sSet("fa:checkins", updated); setNewCI({ weight: "", note: "" });
   };
 
   const delCheckin = (id) => { const u = checkins.filter(c => c.id !== id); setCheckins(u); sSet("fa:checkins", u); };
-  const completeWeek = () => { const next = week + 1; setWeek(next); sSet("fa:week", next); };
+
+  // BUG FIX: cap completeWeek at totalWeeks
+  const completeWeek = () => {
+    const totalWeeks = parseInt(goals.timeframe) || 12;
+    if (week >= totalWeeks) return;
+    const next = week + 1;
+    setWeek(next); sSet("fa:week", next);
+    // Clear exercise completions for the new week
+    setDoneExs({}); sDel("fa:done");
+  };
+
   const setG = (k, v) => setGoals(g => ({ ...g, [k]: v }));
+
+  // Toggle unit system and persist preference
+  const toggleUnit = () => {
+    const next = unit === "kg" ? "lbs" : "kg";
+    setUnit(next); sSet("fa:unit", next);
+  };
+
+  // Toggle individual exercise completion
+  const toggleExercise = (key) => {
+    const updated = { ...doneExs };
+    if (updated[key]) { delete updated[key]; } else { updated[key] = true; }
+    setDoneExs(updated); sSet("fa:done", updated);
+  };
 
   const animateLoad = () => {
     let i = 0; setLStep(0);
@@ -152,28 +229,59 @@ export default function App() {
     setTimeout(tick, 700);
   };
 
-  // Calls /api/chat (our Vercel serverless proxy — API key stays server-side)
+  // BUG FIX: robust callAPI with descriptive error handling
   const callAPI = async (messages, sys) => {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4000, system: sys, messages }),
-    });
-    const data = await res.json();
+    let res;
+    try {
+      res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 4000, system: sys, messages }),
+      });
+    } catch {
+      throw new Error("Network error — check your internet connection and try again.");
+    }
+
+    let data;
+    try { data = await res.json(); } catch {
+      throw new Error(`Server error (${res.status}). Please try again.`);
+    }
+
+    if (!res.ok) {
+      if (data?.error?.includes?.("ANTHROPIC_API_KEY") || res.status === 500) {
+        throw new Error("API key not configured. Add ANTHROPIC_API_KEY to Vercel environment variables.");
+      }
+      if (res.status === 401) throw new Error("Invalid API key. Check your ANTHROPIC_API_KEY in Vercel.");
+      if (res.status === 429) throw new Error("Rate limit reached. Wait a moment and try again.");
+      throw new Error(`API error (${res.status}): ${data?.error || "Unknown error"}`);
+    }
+
     const raw = data.content?.find(b => b.type === "text")?.text || "";
-    return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim());
+    try {
+      return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim());
+    } catch {
+      throw new Error("AI returned an unexpected format. Please try generating again.");
+    }
   };
 
   const generate = async () => {
-    setStep(3); setError(null); animateLoad(); sSet("fa:goals", goals);
+    setStep(3); setError(null); animateLoad();
+    sSet("fa:goals", goals);
+    sDel("fa:plan"); // BUG FIX: clear old plan before generating so stale data doesn't persist on failure
     try {
+      // Convert weight inputs to kg for the API prompt regardless of display unit
+      const wKg = goals.weight     ? toKg(parseFloat(goals.weight), unit)       : "?";
+      const tKg = goals.targetWeight ? toKg(parseFloat(goals.targetWeight), unit) : "?";
       const imgBlock = photoB64 ? [{ type: "image", source: { type: "base64", media_type: photoMime, data: photoB64 } }] : [];
       const parsed = await callAPI(
-        [{ role: "user", content: [...imgBlock, { type: "text", text: `${photoB64 ? "Analyze the body in this photo and " : ""}create a personalized 7-day plan.\nAge:${goals.age || "?"} Gender:${goals.gender} Height:${goals.height || "?"}cm Weight:${goals.weight || "?"}kg Target:${goals.targetWeight || "?"}kg Goal:${goals.fitnessGoal} Activity:${goals.activityLevel} Timeframe:${goals.timeframe}wks Diet:${goals.dietaryPrefs || "none"}\nReturn ONLY valid JSON (no markdown):\n${SCHEMA}` }] }],
+        [{ role: "user", content: [...imgBlock, { type: "text", text: `${photoB64 ? "Analyze the body in this photo and " : ""}create a personalized 7-day plan.\nAge:${goals.age || "?"} Gender:${goals.gender} Height:${goals.height || "?"}cm Weight:${wKg}kg Target:${tKg}kg Goal:${goals.fitnessGoal} Activity:${goals.activityLevel} Timeframe:${goals.timeframe}wks Diet:${goals.dietaryPrefs || "none"}\nReturn ONLY valid JSON (no markdown):\n${SCHEMA}` }] }],
         "You are an elite fitness coach and nutritionist. Return only valid JSON, no markdown."
       );
       setPlan(parsed); sSet("fa:plan", parsed); setStep(4); setTab("workout"); setOpenDay(0);
-    } catch { setError("Generation failed. Please check your connection and try again."); setStep(2); }
+    } catch (err) {
+      setError(err.message || "Generation failed. Please check your connection and try again.");
+      setStep(2);
+    }
   };
 
   const adjustPlan = async () => {
@@ -191,34 +299,43 @@ export default function App() {
         "You are an elite fitness coach. Adapt plans from real-world progress. Return only valid JSON."
       );
       setPlan(parsed); sSet("fa:plan", parsed); setStep(4); setTab("workout"); setOpenDay(0); setAdjusting(false);
-    } catch { setError("Adjustment failed."); setStep(4); setAdjusting(false); }
+    } catch (err) {
+      setError(err.message || "Adjustment failed. Please try again."); setStep(4); setAdjusting(false);
+    }
+  };
+
+  // Copy full plan as plain text
+  const copyPlan = () => {
+    if (!plan) return;
+    let text = "=== MY FITAI PLAN ===\n\n";
+    if (plan.bodyAnalysis) text += `BODY ANALYSIS:\n${plan.bodyAnalysis}\n\n`;
+    text += "WORKOUT PLAN:\n";
+    plan.weeklyWorkout?.forEach(d => {
+      text += `\n${d.day} — ${d.focus} (${d.duration})\n`;
+      if (!d.exercises?.length) { text += "  • Rest day\n"; return; }
+      d.exercises.forEach(ex => text += `  • ${ex.name}: ${ex.sets} sets × ${ex.reps} | Rest: ${ex.rest}${ex.notes ? ` | ${ex.notes}` : ""}\n`);
+    });
+    const mp = plan.mealPlan;
+    if (mp) {
+      text += `\nNUTRITION:\nDaily: ${mp.dailyCalories} kcal | Protein: ${mp.macros?.protein} | Carbs: ${mp.macros?.carbs} | Fats: ${mp.macros?.fats}\n`;
+      mp.meals?.forEach(m => { text += `\n${m.meal} (${m.time}) — ${m.calories} kcal\n`; m.items?.forEach(i => text += `  • ${i}\n`); });
+    }
+    if (plan.tips?.length) { text += "\nPRO TIPS:\n"; plan.tips.forEach((t, i) => text += `${i + 1}. ${t}\n`); }
+    navigator.clipboard.writeText(text).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {});
   };
 
   // ── Derived values ─────────────────────────────────────────────────
   const phase      = weekPhase(week);
   const totalWeeks = parseInt(goals.timeframe) || 12;
   const weekPct    = Math.min(100, Math.round(((week - 1) / totalWeeks) * 100));
+  const groceries  = buildGroceryList(plan?.mealPlan?.meals);
+  const planComplete = week >= totalWeeks;
 
-  // ── Weight chart ───────────────────────────────────────────────────
-  const WeightChart = () => {
-    if (checkins.length < 2) return null;
-    const weights = checkins.map(c => c.weight);
-    const minW = Math.min(...weights) - 1, maxW = Math.max(...weights) + 1;
-    const W = 320, H = 90;
-    const pts = checkins.map((c, i) => {
-      const x = 16 + (i / (checkins.length - 1)) * (W - 32);
-      const y = H - 12 - ((c.weight - minW) / (maxW - minW)) * (H - 24);
-      return [Math.round(x), Math.round(y)];
-    });
-    return (
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block", margin: "0.5rem 0 0.25rem" }}>
-        <polyline points={pts.map(p => p.join(",")).join(" ")} fill="none" stroke={A} strokeWidth="2" strokeLinejoin="round" />
-        {pts.map(([x, y], i) => <circle key={i} cx={x} cy={y} r="3" fill={A} />)}
-        <text x="16" y={H} fill="#555" fontSize="9">{checkins[0].date}</text>
-        <text x={W - 16} y={H} fill="#555" fontSize="9" textAnchor="end">{checkins[checkins.length - 1].date}</text>
-        <text x={pts[pts.length - 1][0]} y={pts[pts.length - 1][1] - 8} fill={A} fontSize="10" textAnchor="middle" fontWeight="700">{checkins[checkins.length - 1].weight}kg</text>
-      </svg>
-    );
+  // Per-day completion counts
+  const dayProgress = (di) => {
+    const exs = plan?.weeklyWorkout?.[di]?.exercises || [];
+    const done = exs.filter((_, ei) => doneExs[`${di}-${ei}`]).length;
+    return { done, total: exs.length };
   };
 
   // ── Render ─────────────────────────────────────────────────────────
@@ -238,6 +355,10 @@ export default function App() {
         )}
         {step === 4 && (
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Unit toggle pill */}
+            <button onClick={toggleUnit} title="Toggle kg / lbs" style={{ background: "#1A1D1E", border: "1px solid #2A2D30", borderRadius: 20, padding: "3px 10px", fontSize: "0.72rem", fontWeight: 700, color: "#8A8F95", cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>
+              {unit.toUpperCase()}
+            </button>
             <Tag color="#1C2010">{phase.label}</Tag>
             <span style={{ color: "#8A8F95", fontSize: "0.8rem" }}>Wk {week}</span>
           </div>
@@ -268,7 +389,7 @@ export default function App() {
         <div style={{ padding: "2rem 1.5rem 0", maxWidth: 540 }}>
           <h2 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "1.7rem", letterSpacing: "-0.03em", margin: "0 0 0.4rem" }}>Your photo</h2>
           <p style={{ color: "#8A8F95", fontSize: "0.9rem", margin: "0 0 1.75rem" }}>A full-body photo helps AI analyze your composition. Optional but recommended.</p>
-          <div style={{ border: `2px dashed ${photo ? "#C8F135" : "#2A2D30"}`, borderRadius: 16, padding: "2.5rem 1.5rem", textAlign: "center", cursor: "pointer" }} onClick={() => fileRef.current?.click()}>
+          <div style={{ border: `2px dashed ${photo ? A : "#2A2D30"}`, borderRadius: 16, padding: "2.5rem 1.5rem", textAlign: "center", cursor: "pointer" }} onClick={() => fileRef.current?.click()}>
             <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handlePhoto} />
             {photo ? (
               <>
@@ -293,7 +414,13 @@ export default function App() {
       {/* ── Goals ── */}
       {step === 2 && (
         <div style={{ padding: "2rem 1.5rem 0", maxWidth: 560 }}>
-          <h2 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "1.7rem", letterSpacing: "-0.03em", margin: "0 0 0.4rem" }}>Your goals</h2>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "0 0 0.4rem" }}>
+            <h2 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "1.7rem", letterSpacing: "-0.03em", margin: 0 }}>Your goals</h2>
+            {/* Unit toggle on goals page too */}
+            <button onClick={toggleUnit} style={{ background: "#1A1D1E", border: `1.5px solid ${A}55`, borderRadius: 20, padding: "5px 14px", fontSize: "0.8rem", fontWeight: 700, color: A, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>
+              {unit === "kg" ? "Switch to lbs" : "Switch to kg"}
+            </button>
+          </div>
           <p style={{ color: "#8A8F95", fontSize: "0.9rem", margin: "0 0 1.75rem" }}>Tell us about yourself so we can build the right plan.</p>
           {error && <div style={{ background: "#2A1010", border: "1px solid #5A2020", borderRadius: 10, padding: "0.9rem 1.1rem", marginBottom: "1rem", color: "#F07070", fontSize: "0.875rem" }}>{error}</div>}
 
@@ -324,10 +451,16 @@ export default function App() {
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: "1.25rem" }}>
             <div><div style={lbl}>Height (cm)</div><input style={inp} type="number" placeholder="e.g. 175" value={goals.height} onChange={e => setG("height", e.target.value)} /></div>
-            <div><div style={lbl}>Current weight (kg)</div><input style={inp} type="number" placeholder="e.g. 80" value={goals.weight} onChange={e => setG("weight", e.target.value)} /></div>
+            <div>
+              <div style={lbl}>Current weight ({unit})</div>
+              <input style={inp} type="number" placeholder={unit === "kg" ? "e.g. 80" : "e.g. 176"} value={goals.weight} onChange={e => setG("weight", e.target.value)} />
+            </div>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: "1.25rem" }}>
-            <div><div style={lbl}>Target weight (kg)</div><input style={inp} type="number" placeholder="e.g. 72" value={goals.targetWeight} onChange={e => setG("targetWeight", e.target.value)} /></div>
+            <div>
+              <div style={lbl}>Target weight ({unit})</div>
+              <input style={inp} type="number" placeholder={unit === "kg" ? "e.g. 72" : "e.g. 158"} value={goals.targetWeight} onChange={e => setG("targetWeight", e.target.value)} />
+            </div>
             <div><div style={lbl}>Timeframe (weeks)</div><input style={inp} type="number" placeholder="e.g. 12" value={goals.timeframe} onChange={e => setG("timeframe", e.target.value)} /></div>
           </div>
           <div style={{ marginBottom: "1.25rem" }}>
@@ -361,7 +494,13 @@ export default function App() {
       {/* ── Results ── */}
       {step === 4 && plan && (
         <div style={{ padding: "2rem 1.5rem 0", maxWidth: 560, animation: "fadeIn 0.4s ease" }}>
-          <h2 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "1.7rem", letterSpacing: "-0.03em", margin: "0 0 0.35rem" }}>Your plan</h2>
+          <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", margin: "0 0 0.35rem" }}>
+            <h2 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: "1.7rem", letterSpacing: "-0.03em", margin: 0 }}>Your plan</h2>
+            {/* Copy plan button */}
+            <button onClick={copyPlan} style={{ background: copied ? "#1C2010" : "#1A1D1E", border: `1px solid ${copied ? A : "#2A2D30"}`, borderRadius: 8, padding: "6px 12px", fontSize: "0.75rem", fontWeight: 600, color: copied ? A : "#8A8F95", cursor: "pointer", fontFamily: "'DM Sans',sans-serif", transition: "all 0.2s", flexShrink: 0 }}>
+              {copied ? "✓ Copied!" : "📋 Copy"}
+            </button>
+          </div>
           <p style={{ color: "#8A8F95", fontSize: "0.85rem", margin: "0 0 1.25rem" }}>Personalized for your body & goals · Saved to this device</p>
 
           {plan.bodyAnalysis && (
@@ -371,14 +510,17 @@ export default function App() {
             </div>
           )}
 
-          {/* 5-tab strip */}
+          {/* 5-tab strip with icons */}
           <div style={{ display: "flex", gap: 3, background: "#1A1D1E", padding: 4, borderRadius: 12, marginBottom: "1.5rem" }}>
-            {[["workout", "Workout"], ["meal", "Meals"], ["progress", "Progress"], ["checkin", "Check-in"], ["tips", "Tips"]].map(([id, label]) => (
-              <button key={id} style={{ flex: 1, padding: "0.6rem 2px", borderRadius: 9, border: "none", cursor: "pointer", background: tab === id ? A : "transparent", color: tab === id ? "#0C0E10" : "#8A8F95", fontFamily: "'DM Sans',sans-serif", fontWeight: 700, fontSize: "0.72rem", transition: "all 0.2s" }} onClick={() => setTab(id)}>{label}</button>
+            {[["workout","💪","Workout"],["meal","🥗","Meals"],["progress","📷","Progress"],["checkin","📊","Check-in"],["tips","💡","Tips"]].map(([id, icon, label]) => (
+              <button key={id} style={{ flex: 1, padding: "0.55rem 2px", borderRadius: 9, border: "none", cursor: "pointer", background: tab === id ? A : "transparent", color: tab === id ? "#0C0E10" : "#8A8F95", fontFamily: "'DM Sans',sans-serif", fontWeight: 700, fontSize: "0.62rem", transition: "all 0.2s", lineHeight: 1.4, display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }} onClick={() => setTab(id)}>
+                <span style={{ fontSize: "0.85rem" }}>{icon}</span>
+                <span>{label}</span>
+              </button>
             ))}
           </div>
 
-          {/* Workout tab */}
+          {/* ── Workout tab ── */}
           {tab === "workout" && (
             <>
               <div style={{ background: "#141617", border: `1px solid ${phase.color}33`, borderRadius: 12, padding: "0.9rem 1.1rem", marginBottom: "1.25rem" }}>
@@ -388,7 +530,14 @@ export default function App() {
                     <span style={{ margin: "0 8px", color: "#333" }}>·</span>
                     <span style={{ fontSize: "0.82rem", color: phase.color, fontWeight: 600 }}>{phase.label}</span>
                   </div>
-                  <button style={{ background: A, color: "#0C0E10", border: "none", padding: "5px 12px", borderRadius: 20, fontSize: "0.74rem", fontWeight: 700, cursor: "pointer" }} onClick={completeWeek}>Mark Complete →</button>
+                  {/* BUG FIX: disabled + label when plan is complete */}
+                  <button
+                    style={{ background: planComplete ? "#1A1D1E" : A, color: planComplete ? "#555" : "#0C0E10", border: planComplete ? "1px solid #2A2D30" : "none", padding: "5px 12px", borderRadius: 20, fontSize: "0.74rem", fontWeight: 700, cursor: planComplete ? "not-allowed" : "pointer" }}
+                    onClick={completeWeek}
+                    disabled={planComplete}
+                  >
+                    {planComplete ? "🎉 Plan Complete!" : "Mark Complete →"}
+                  </button>
                 </div>
                 <div style={{ fontSize: "0.78rem", color: "#8A8F95", marginBottom: 8 }}>{phase.note}</div>
                 <div style={{ background: "#0C0E10", borderRadius: 6, height: 5, overflow: "hidden" }}>
@@ -399,46 +548,84 @@ export default function App() {
                 </div>
               </div>
 
-              {plan.weeklyWorkout?.map((day, di) => (
-                <div key={di} style={{ ...card, marginBottom: "0.65rem" }}>
-                  <div style={{ padding: "0.9rem 1.1rem", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer" }} onClick={() => setOpenDay(openDay === di ? -1 : di)}>
-                    <span style={{ fontWeight: 700, fontSize: "0.9rem" }}>{day.day}</span>
-                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <Tag>{day.focus}</Tag>
-                      <span style={{ color: "#555", fontSize: "0.8rem" }}>{day.duration}</span>
-                      <span style={{ color: "#555", fontSize: "0.85rem" }}>{openDay === di ? "▲" : "▼"}</span>
+              {plan.weeklyWorkout?.map((day, di) => {
+                // BUG FIX: handle rest days (no exercises array or empty)
+                const isRestDay = !day.exercises?.length;
+                const { done, total } = dayProgress(di);
+                const allDone = total > 0 && done === total;
+                return (
+                  <div key={di} style={{ ...card, marginBottom: "0.65rem", border: `1.5px solid ${allDone ? A + "66" : "#2A2D30"}` }}>
+                    <div
+                      style={{ padding: "0.9rem 1.1rem", display: "flex", alignItems: "center", justifyContent: "space-between", cursor: isRestDay ? "default" : "pointer" }}
+                      onClick={() => !isRestDay && setOpenDay(openDay === di ? -1 : di)}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontWeight: 700, fontSize: "0.9rem" }}>{day.day}</span>
+                        {/* Exercise completion counter */}
+                        {!isRestDay && total > 0 && (
+                          <span style={{ fontSize: "0.7rem", fontWeight: 700, color: allDone ? A : "#555", background: allDone ? "#1C2010" : "#0C0E10", border: `1px solid ${allDone ? A + "44" : "#2A2D30"}`, borderRadius: 20, padding: "1px 7px" }}>
+                            {done}/{total}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <Tag color={isRestDay ? "#161819" : "#1C2010"} text={isRestDay ? "#555" : A}>
+                          {isRestDay ? "Rest" : day.focus}
+                        </Tag>
+                        {!isRestDay && <span style={{ color: "#555", fontSize: "0.8rem" }}>{day.duration}</span>}
+                        {!isRestDay && <span style={{ color: "#555", fontSize: "0.85rem" }}>{openDay === di ? "▲" : "▼"}</span>}
+                      </div>
                     </div>
+
+                    {/* BUG FIX: rest day message instead of blank */}
+                    {isRestDay && (
+                      <div style={{ padding: "0 1.1rem 0.85rem", color: "#555", fontSize: "0.82rem" }}>
+                        Recovery day · stretch, foam roll, or light walk 🧘
+                      </div>
+                    )}
+
+                    {!isRestDay && openDay === di && (
+                      <div style={{ borderTop: "1px solid #1F2224", padding: "0.75rem 1.1rem 1rem" }}>
+                        {week > 4 && (
+                          <div style={{ background: "#141617", border: `1px solid ${phase.color}44`, borderRadius: 8, padding: "6px 10px", marginBottom: 10, fontSize: "0.74rem", color: phase.color }}>
+                            {phase.label}: target <strong>{phase.weight}</strong> more on compounds{phase.sets > 0 ? ` · +${phase.sets} set` : ""}
+                          </div>
+                        )}
+                        {day.exercises.map((ex, ei) => {
+                          const key = `${di}-${ei}`;
+                          const done = !!doneExs[key];
+                          return (
+                            <div key={ei} style={{ display: "grid", gridTemplateColumns: "22px 1fr auto", alignItems: "start", gap: 8, padding: "0.65rem 0", borderBottom: ei < day.exercises.length - 1 ? "1px solid #1F2224" : "none", opacity: done ? 0.45 : 1, transition: "opacity 0.2s" }}>
+                              {/* Exercise completion checkbox */}
+                              <button
+                                onClick={() => toggleExercise(key)}
+                                style={{ width: 20, height: 20, borderRadius: 5, border: `2px solid ${done ? A : "#2A2D30"}`, background: done ? A : "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 3, transition: "all 0.15s" }}
+                              >
+                                {done && <span style={{ color: "#0C0E10", fontSize: "0.6rem", fontWeight: 900 }}>✓</span>}
+                              </button>
+                              <div>
+                                <div style={{ fontWeight: 600, fontSize: "0.88rem", textDecoration: done ? "line-through" : "none" }}>{ex.name}</div>
+                                {ex.notes && <div style={{ color: "#8A8F95", fontSize: "0.76rem", marginTop: 3 }}>{ex.notes}</div>}
+                              </div>
+                              <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                {ex.sets && <span style={{ background: "#0C0E10", border: "1px solid #2A2D30", borderRadius: 6, padding: "2px 7px", fontSize: "0.7rem", color: "#8A8F95" }}>{week > 4 ? ex.sets + phase.sets : ex.sets}×</span>}
+                                {ex.reps && <span style={{ background: "#0C0E10", border: "1px solid #2A2D30", borderRadius: 6, padding: "2px 7px", fontSize: "0.7rem", color: "#8A8F95" }}>{ex.reps}</span>}
+                                {ex.rest && <span style={{ background: "#0C0E10", border: "1px solid #2A2D30", borderRadius: 6, padding: "2px 7px", fontSize: "0.7rem", color: "#555" }}>{ex.rest}</span>}
+                                <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(ex.name + " exercise proper form tutorial")}`} target="_blank" rel="noreferrer"
+                                  style={{ background: "#1C2010", color: A, fontSize: "0.7rem", fontWeight: 700, padding: "3px 8px", borderRadius: 20, textDecoration: "none", whiteSpace: "nowrap" }}>▶ Demo</a>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                  {openDay === di && day.exercises?.length > 0 && (
-                    <div style={{ borderTop: "1px solid #1F2224", padding: "0.75rem 1.1rem 1rem" }}>
-                      {week > 4 && (
-                        <div style={{ background: "#141617", border: `1px solid ${phase.color}44`, borderRadius: 8, padding: "6px 10px", marginBottom: 10, fontSize: "0.74rem", color: phase.color }}>
-                          {phase.label}: target <strong>{phase.weight}</strong> more on compounds{phase.sets > 0 ? ` · +${phase.sets} set` : ""}
-                        </div>
-                      )}
-                      {day.exercises.map((ex, ei) => (
-                        <div key={ei} style={{ display: "grid", gridTemplateColumns: "1fr auto", alignItems: "start", gap: 8, padding: "0.6rem 0", borderBottom: ei < day.exercises.length - 1 ? "1px solid #1F2224" : "none" }}>
-                          <div>
-                            <div style={{ fontWeight: 600, fontSize: "0.88rem" }}>{ex.name}</div>
-                            {ex.notes && <div style={{ color: "#8A8F95", fontSize: "0.76rem", marginTop: 3 }}>{ex.notes}</div>}
-                          </div>
-                          <div style={{ display: "flex", gap: 5, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-                            {ex.sets && <span style={{ background: "#0C0E10", border: "1px solid #2A2D30", borderRadius: 6, padding: "2px 7px", fontSize: "0.7rem", color: "#8A8F95" }}>{week > 4 ? ex.sets + phase.sets : ex.sets} sets</span>}
-                            {ex.reps && <span style={{ background: "#0C0E10", border: "1px solid #2A2D30", borderRadius: 6, padding: "2px 7px", fontSize: "0.7rem", color: "#8A8F95" }}>{ex.reps}</span>}
-                            {ex.rest && <span style={{ background: "#0C0E10", border: "1px solid #2A2D30", borderRadius: 6, padding: "2px 7px", fontSize: "0.7rem", color: "#8A8F95" }}>{ex.rest}</span>}
-                            <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(ex.name + " exercise proper form tutorial")}`} target="_blank" rel="noreferrer"
-                              style={{ background: "#1C2010", color: A, fontSize: "0.7rem", fontWeight: 700, padding: "3px 8px", borderRadius: 20, textDecoration: "none", whiteSpace: "nowrap" }}>▶ Demo</a>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
+                );
+              })}
             </>
           )}
 
-          {/* Meals tab */}
+          {/* ── Meals tab ── */}
           {tab === "meal" && (
             <>
               {plan.mealPlan?.macros && (
@@ -475,10 +662,34 @@ export default function App() {
                   </div>
                 </div>
               ))}
+
+              {/* NEW: Grocery list */}
+              {groceries.length > 0 && (
+                <div style={{ marginTop: "1.75rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <SLbl>Grocery list ({groceries.length} items)</SLbl>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(groceries.map((g, i) => `${i + 1}. ${g}`).join("\n")).catch(() => {})}
+                      style={{ background: "#1A1D1E", border: "1px solid #2A2D30", borderRadius: 8, padding: "4px 10px", fontSize: "0.72rem", fontWeight: 600, color: "#8A8F95", cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}
+                    >
+                      📋 Copy list
+                    </button>
+                  </div>
+                  <div style={{ ...card, padding: "0.85rem 1.1rem" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3px 20px" }}>
+                      {groceries.map((item, i) => (
+                        <div key={i} style={{ color: "#B0B5BC", fontSize: "0.82rem", padding: "3px 0", display: "flex", alignItems: "center", gap: 7 }}>
+                          <div style={{ width: 4, height: 4, borderRadius: "50%", background: "#2A2D30", flexShrink: 0 }} />{item}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
 
-          {/* Progress Photos tab */}
+          {/* ── Progress tab ── */}
           {tab === "progress" && (
             <>
               <input ref={progRef} type="file" accept="image/*" capture="environment" onChange={handleProgPhoto} />
@@ -499,8 +710,10 @@ export default function App() {
                   {checkins.length >= 2 && (
                     <div style={{ marginTop: 10, ...card, padding: "0.75rem 1rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                       <span style={{ fontSize: "0.78rem", color: "#8A8F95" }}>Weight change since start</span>
+                      {/* BUG FIX: respect unit for weight change display */}
                       <span style={{ fontWeight: 700, color: (checkins[checkins.length - 1].weight - checkins[0].weight) < 0 ? "#4AFC9A" : "#FF7A5A" }}>
-                        {(checkins[checkins.length - 1].weight - checkins[0].weight) > 0 ? "+" : ""}{(checkins[checkins.length - 1].weight - checkins[0].weight).toFixed(1)} kg
+                        {(checkins[checkins.length - 1].weight - checkins[0].weight) > 0 ? "+" : ""}
+                        {toDisplay(Math.abs(checkins[checkins.length - 1].weight - checkins[0].weight), unit).toFixed(1)} {unit}
                       </span>
                     </div>
                   )}
@@ -537,13 +750,14 @@ export default function App() {
             </>
           )}
 
-          {/* Check-in tab */}
+          {/* ── Check-in tab ── */}
           {tab === "checkin" && (
             <>
               <div style={{ ...card, padding: "1.1rem 1.25rem", marginBottom: "1.25rem" }}>
                 <SLbl>Log today's check-in</SLbl>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-                  <div><div style={lbl}>Weight (kg)</div><input style={inp} type="number" placeholder="e.g. 78.5" value={newCI.weight} onChange={e => setNewCI(c => ({ ...c, weight: e.target.value }))} /></div>
+                  {/* BUG FIX: placeholder respects unit */}
+                  <div><div style={lbl}>Weight ({unit})</div><input style={inp} type="number" placeholder={unit === "kg" ? "e.g. 78.5" : "e.g. 173"} value={newCI.weight} onChange={e => setNewCI(c => ({ ...c, weight: e.target.value }))} /></div>
                   <div><div style={lbl}>Week</div><div style={{ ...inp, cursor: "default", color: "#8A8F95", display: "flex", alignItems: "center" }}>Week {week}</div></div>
                 </div>
                 <div style={{ marginBottom: 12 }}>
@@ -558,11 +772,12 @@ export default function App() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                     <SLbl>Weight trend</SLbl>
                     <div style={{ display: "flex", gap: 12 }}>
-                      <span style={{ fontSize: "0.78rem", color: "#8A8F95" }}>Start: <strong style={{ color: "#F0F2F4" }}>{checkins[0].weight}kg</strong></span>
-                      <span style={{ fontSize: "0.78rem", color: "#8A8F95" }}>Now: <strong style={{ color: A }}>{checkins[checkins.length - 1].weight}kg</strong></span>
+                      {/* BUG FIX: display in correct unit */}
+                      <span style={{ fontSize: "0.78rem", color: "#8A8F95" }}>Start: <strong style={{ color: "#F0F2F4" }}>{toDisplay(checkins[0].weight, unit)}{unit}</strong></span>
+                      <span style={{ fontSize: "0.78rem", color: "#8A8F95" }}>Now: <strong style={{ color: A }}>{toDisplay(checkins[checkins.length - 1].weight, unit)}{unit}</strong></span>
                     </div>
                   </div>
-                  <WeightChart />
+                  <WeightChart checkins={checkins} unit={unit} />
                 </div>
               )}
 
@@ -573,7 +788,8 @@ export default function App() {
                     <div key={ci.id} style={{ ...card, padding: "0.85rem 1rem", marginBottom: "0.5rem", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
                       <div>
                         <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: ci.note ? 4 : 0 }}>
-                          <span style={{ fontWeight: 700, color: A }}>{ci.weight}kg</span>
+                          {/* BUG FIX: display weight in correct unit */}
+                          <span style={{ fontWeight: 700, color: A }}>{toDisplay(ci.weight, unit)}{unit}</span>
                           <Tag color="#1A1D1E" text="#8A8F95">Wk {ci.week}</Tag>
                           <span style={{ fontSize: "0.78rem", color: "#555" }}>{ci.date}</span>
                         </div>
@@ -603,7 +819,7 @@ export default function App() {
             </>
           )}
 
-          {/* Tips tab */}
+          {/* ── Tips tab ── */}
           {tab === "tips" && (
             <>
               <SLbl>Pro tips for your goals</SLbl>
@@ -617,7 +833,7 @@ export default function App() {
 
           <div style={{ display: "flex", gap: 10, marginTop: "2.5rem", flexWrap: "wrap" }}>
             <button style={btnP} onClick={() => { setStep(2); setPlan(null); setError(null); }}>Regenerate Plan →</button>
-            <button style={btnS} onClick={() => { setStep(0); setPhoto(null); setPhotoB64(null); setPlan(null); setError(null); setWeek(1); setProgPhotos([]); setCheckins([]); sDel("fa:plan"); sDel("fa:week"); sDel("fa:photos"); sDel("fa:checkins"); }}>Start Over</button>
+            <button style={btnS} onClick={() => { setStep(0); setPhoto(null); setPhotoB64(null); setPlan(null); setError(null); setWeek(1); setProgPhotos([]); setCheckins([]); setDoneExs({}); sDel("fa:plan"); sDel("fa:week"); sDel("fa:photos"); sDel("fa:checkins"); sDel("fa:done"); }}>Start Over</button>
           </div>
         </div>
       )}
