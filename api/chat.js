@@ -34,7 +34,18 @@ export default async function handler(req, res) {
     });
 
     const data = await upstream.json();
-    return res.status(upstream.status).json(data);
+if (data.content) {
+  data.content = data.content.map(block => {
+    if (block.type === "text") {
+      const t = block.text;
+      const start = t.indexOf("{");
+      const end = t.lastIndexOf("}");
+      if (start !== -1 && end !== -1) block.text = t.slice(start, end + 1);
+    }
+    return block;
+  });
+}
+return res.status(upstream.status).json(data);
   } catch (err) {
     console.error("Anthropic proxy error:", err);
     return res.status(500).json({ error: "Upstream API call failed: " + err.message });
