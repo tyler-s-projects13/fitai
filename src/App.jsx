@@ -352,7 +352,7 @@ export default function App() {
       throw new Error(`API error (${res.status}): ${data?.error || "Unknown"}`);
     }
     const raw = data.content?.find(b => b.type === "text")?.text || "";
-    try { return JSON.parse(raw.replace(/```json\n?|\n?```/g,"").trim()); }
+    try { return JSON.parse(raw.replace(/```json[\s\S]*?```|```/g,"").trim()); }
     catch { throw new Error("Parse error: " + raw.slice(0, 200)); }
   };
 
